@@ -7,5 +7,9 @@
   },
   "peerDependencies": {
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "ethers": "^6.7.1",
+    "web3": "^4.1.2"
   }
 }
