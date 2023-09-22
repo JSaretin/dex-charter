@@ -8,6 +8,7 @@ interface CreatedWallet {
 
 const SEED_PHRASE = process.env.SEED_PHRASE as string;
 const DEX_ABI = await Bun.file("./abi/dex.json").json();
+const ERC20_ABI = await Bun.file("./abi/erc20.json").json();
 const DEX_ROUTER_ADDR = process.env.DEX_ROUTER_ADDR as string;
 const PROVIDER_URI = process.env.PROVIDER_URI as string;
 
@@ -70,12 +71,36 @@ async function trade(
   amount: number
 ) {
   const wallet = w3.eth.accounts.privateKeyToAccount(privateKey);
+
   const data = await generateTradeData(
     wallet.address,
     baseToken,
     receiveToken,
     amount
   );
+
+  const contract = new w3.eth.Contract(ERC20_ABI, baseToken);
+  const allowance = await (contract.methods.allowance as any)(
+    wallet.address,
+    DEX_ROUTER_ADDR
+  ).call();
+
+  // if amount to trade is greater the the allowance, approve totalSupply to
+  // the DEX contract (this will save us gas in the long run since these are just
+  // dummy accounts that we will not be using to hold for long)
+  if (allowance < w3.utils.toWei(amount.toString(), "ether")) {
+    const totalSupply = await (contract.methods.totalSupply as any)().call();
+    const approveData = (contract.methods.approve as any)(
+      DEX_ROUTER_ADDR,
+      totalSupply
+    ).encodeABI();
+    const approveTransaction = await executeTransaction(
+      approveData,
+      baseToken,
+      privateKey
+    );
+    console.log(approveTransaction);
+  }
 
   const transaction = await executeTransaction(
     data,
@@ -93,7 +118,7 @@ async function sendToken(
   to: string,
   amount: number
 ) {
-  const contract = new w3.eth.Contract([], contractAddr);
+  const contract = new w3.eth.Contract(ERC20_ABI, contractAddr);
   const data = (contract.methods.transfer as any)(
     to,
     w3.utils.toWei(amount.toString(), "ether")
@@ -113,6 +138,16 @@ async function generateWallet(
     address: wallet.address,
   };
 }
+
+const w = await generateWallet(SEED_PHRASE);
+// console.log(w)
+
+sendToken(
+  "0xe9e7cea3dedca5984780bafc599bd69add087d56",
+  w.privateKey,
+  "0x5A568d8280d499083F6b1BF1D4B546ac24486948",
+  0
+);
 
 // for (let i = 0; i < 10; i++) {
 //   const w = await generateWallet(SEED_PHRASE, i);
