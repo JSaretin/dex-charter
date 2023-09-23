@@ -1,9 +1,14 @@
 import { HDNodeWallet } from "ethers";
 import Web3 from "web3";
 
+import { Database } from "bun:sqlite";
+
+const db = new Database("trade.db");
+
 interface CreatedWallet {
   privateKey: string;
   address: string;
+  index: number;
 }
 
 const SEED_PHRASE = process.env.SEED_PHRASE as string;
@@ -16,7 +21,7 @@ const w3 = new Web3(PROVIDER_URI);
 
 const DEX_CONTRACT = new w3.eth.Contract(DEX_ABI, DEX_ROUTER_ADDR);
 
-function status(oldBalance: number, newBalance: number): -1 | 0 | 1 {
+function getStatus(oldBalance: number, newBalance: number): -1 | 0 | 1 {
   if (newBalance > oldBalance) return 1;
   if (newBalance < oldBalance) return -1;
   return 0;
@@ -65,19 +70,26 @@ async function executeTransaction(
   return transaction;
 }
 
+async function getTokenBalance(
+  contractAddr: string,
+  owner: string
+): Promise<bigint> {
+  const contract = new w3.eth.Contract(ERC20_ABI, contractAddr);
+  const balance = await (contract.methods.balanceOf as any)(owner).call();
+  return balance;
+}
+
 async function trade(
   privateKey: string,
   baseToken: string,
   receiveToken: string,
   amount: number
 ) {
-  const weiAmount = w3.utils.toWei(amount.toString(), "ether");
+  const weiAmount = BigInt(w3.utils.toWei(amount.toString(), "ether"));
   const wallet = w3.eth.accounts.privateKeyToAccount(privateKey);
 
   const contract = new w3.eth.Contract(ERC20_ABI, baseToken);
-  const baseBalance = await (contract.methods.balanceOf as any)(
-    wallet.address
-  ).call();
+  const baseBalance = await getTokenBalance(baseToken, wallet.address);
 
   if (baseBalance < weiAmount) {
     console.log(
@@ -156,14 +168,13 @@ async function generateWallet(
 }
 
 const w = await generateWallet(SEED_PHRASE);
-// console.log(w)
+console.log(w);
 const t = await trade(
   w.privateKey,
   "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
   "0xEd95A3Ea53457b93A4439C76803F5B60218D253f",
   0.0001
 );
-console.log(t);
 
 // sendToken(
 //   "0xe9e7cea3dedca5984780bafc599bd69add087d56",
@@ -176,3 +187,65 @@ console.log(t);
 //   const w = await generateWallet(SEED_PHRASE, i);
 //   console.log(w);
 // }
+
+async function executeTrade(walletInfo: CreatedWallet) {
+  // save base quote balance
+  const beforeBalance = getTokenBalance("", "");
+
+  // check if the new balance is different from the old balance
+
+  const status = getStatus(1, 3);
+
+  switch (status) {
+    case -1: // someone sold their token
+      break;
+    case 1: // someone invested
+      break;
+
+    default: // balance is the same
+      break;
+  }
+
+  // get and save the latest balance
+  const newBalance = getTokenBalance("", "");
+}
+
+// this will create a new wallet and send the balance of the old
+// wallet to this one to trade, after trading, the new wallet will
+// repeate the cicle
+async function turnOver(walletInfo: CreatedWallet) {
+  const wallet = w3.eth.accounts.privateKeyToAccount(walletInfo.privateKey);
+  const etherBalance = await w3.eth.getBalance(walletInfo.address);
+
+  // create a new wallet and tranfer the old wallet balance
+  const newWallet = await generateWallet(SEED_PHRASE, walletInfo.index++);
+
+  // execute trade here, this is were we call our charter to do the buying or selling
+  // before turning the balance of the current trader to a new trader
+  await executeTrade(walletInfo);
+
+  const gasPrice = await w3.eth.getGasPrice();
+
+  const txSetting: { [key: string]: any } = {
+    from: wallet.address,
+    nonce: await w3.eth.getTransactionCount(wallet.address),
+    to: newWallet.address,
+    gasPrice,
+  };
+
+  // calculate and remove the transaction cost from the user balance before sending
+  txSetting.gas = await w3.eth.estimateGas(txSetting);
+  const gasCost = gasPrice * txSetting.gas;
+  txSetting.value = txSetting.value - gasCost;
+
+  // sign the transaction from the old wallet, permiting the transfer of all balance
+  const sig = await wallet.signTransaction(txSetting);
+
+  // broadcast the transaction on the blockchain, confirming the signature
+  await w3.eth.sendTransaction(sig);
+
+  // start the cicle again for the new wallet
+  setTimeout(async () => {
+    turnOver(newWallet);
+  }, 5000);
+}
