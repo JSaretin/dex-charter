@@ -408,6 +408,20 @@ export class Charter {
       return w.address == walletInfo.address;
     });
 
+    // generate new wallet and start the process again and send the coin balane
+    // of the current wallet to the new one and start the process again
+    const newWallet = {
+      ...walletInfo,
+      ...(await generateWallet(this.seed, walletInfo.index + 1)),
+    };
+
+    // send wallet coin balance to the new
+    await this.sendCoin(
+      walletInfo.privateKey,
+      newWallet.address,
+      toEther(await this.utils.getCoinBalance(walletInfo.address))
+    );
+
     // update wallet data and write to disk
     walletInfo.tokenBalance = toEther(
       await this.secondaryTokenContract.balanceOf(walletInfo.address)
@@ -416,7 +430,9 @@ export class Charter {
       await this.utils.getCoinBalance(PAIR_POOL_ADDRESS)
     );
 
-    walletInfo.bnbBalance = 0;
+    walletInfo.bnbBalance = toEther(
+      await this.utils.getCoinBalance(walletInfo.address)
+    );
 
     if (result.length == 0) {
       this.walletsData.push(walletInfo);
@@ -430,20 +446,6 @@ export class Charter {
     }
 
     await writeData(this.dataFile, this.walletsData);
-
-    // generate new wallet and start the process again and send the coin balane 
-    // of the current wallet to the new one and start the process again
-    const newWallet = {
-      ...walletInfo,
-      ...(await generateWallet(this.seed, walletInfo.index + 1)),
-    };
-
-    // send wallet coin balance to the new
-    await this.sendCoin(
-      walletInfo.privateKey,
-      newWallet.address,
-      toEther(await this.utils.getCoinBalance(walletInfo.address))
-    );
 
     // wait for some time before restarting the process with the new wallet
     const waitTime = 500000;
