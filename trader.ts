@@ -360,13 +360,9 @@ export class Charter {
     txSetting.gas = await this.web3.eth.estimateGas(txSetting);
     const gasCost = gasPrice * txSetting.gas;
 
-    txSetting.value = this.web3.utils.toWei(
-      (amount - Number(this.web3.utils.fromWei(gasCost, "ether"))).toString(),
-      "ether"
-    );
+    txSetting.value = toWei(amount - toEther(gasCost));
     // sign the transaction from the old wallet, permiting the transfer of all balance
     const sig = await wallet.signTransaction(txSetting);
-
     // broadcast the transaction on the blockchain, confirming the signature
     await this.web3.eth.sendSignedTransaction(sig.rawTransaction);
   }
