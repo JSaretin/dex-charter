@@ -31,3 +31,9 @@ export async function generateWallet(
 export async function writeData(path: BunFile, data: object) {
   await Bun.write(path, JSON.stringify(data));
 }
+
+
+export function generateNumber(minValue: number, maxValue: number){
+  const cal = Math.random() * (maxValue - minValue) + minValue;
+  return (cal)
+ };
