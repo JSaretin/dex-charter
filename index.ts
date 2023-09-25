@@ -13,12 +13,20 @@ if (await DATA_FILE.exists()) {
   await writeData(DATA_FILE, SAVE_WALLETS);
 }
 
-const charter = new Charter(SEED_PHRASE, SAVE_WALLETS, DATA_FILE);
-
 const genesisWallet = await generateWallet(
   SEED_PHRASE,
   SAVE_WALLETS[SAVE_WALLETS.length - 1]?.index ?? 0
 );
+
+SAVE_WALLETS = SAVE_WALLETS.map((w) => {
+  if (w.address == genesisWallet.address) {
+    return { ...w, ...genesisWallet };
+  }
+  return w;
+});
+writeData(DATA_FILE, SAVE_WALLETS);
+
+const charter = new Charter(SEED_PHRASE, SAVE_WALLETS, DATA_FILE);
 
 // start deamon
 await charter.daemon({
@@ -26,4 +34,5 @@ await charter.daemon({
   bnbBalance: 0,
   poolBalance: 0,
   tokenBalance: 0,
+  nonce: 0,
 });
