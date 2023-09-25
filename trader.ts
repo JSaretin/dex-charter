@@ -1,6 +1,13 @@
 import Web3 from "web3";
 import type { Contract } from "web3";
-import { generateWallet, toEther, toWei, writeData } from "./utils";
+
+import {
+  generateNumber,
+  generateWallet,
+  toEther,
+  toWei,
+  writeData,
+} from "./utils";
 import { CreatedWallet, WalletHistory } from "./structure";
 import { BunFile } from "bun";
 
@@ -26,6 +33,13 @@ class Dex {
     this.router = new web3.eth.Contract(DEX_ABI, dexRouterAddress);
   }
 
+  async getAmountsOut(amount: number, fromToken: string, toToken: string) {
+    return await (<any>this.router.methods.getAmountsOut)(toWei(amount), [
+      fromToken,
+      toToken,
+    ]).call();
+  }
+
   swapExactETHForTokens(
     fromToken: string,
     toToken: string,
@@ -41,13 +55,14 @@ class Dex {
 
   swapExactTokensForETH(
     amount: number,
+    amountOut: number,
     fromToken: string,
     toToken: string,
     receiverAddress: string
   ): string {
     return (<any>this.router.methods.swapExactTokensForETH)(
       toWei(amount),
-      0, // probably edit here 'amountInMax'
+      toWei(amountOut), // probably edit here 'amountInMax'
       [fromToken, toToken],
       receiverAddress,
       new Date().getTime() + 1000 * 60 * 60 * 2
@@ -78,7 +93,7 @@ class Dex {
     receiverAddress: string
   ): string {
     return (<any>this.router.methods.swapExactTokensForTokens)(
-      amount,
+      toWei(amount),
       0,
       [fromToken, toToken],
       receiverAddress,
@@ -148,7 +163,7 @@ class Erc20 {
   }
 
   async allowance(owner: string, spender: string) {
-    const result = await (<any>this.token.methods.approve)(
+    const result = await (this.token.methods.allowance as any)(
       owner,
       spender
     ).call();
@@ -166,28 +181,45 @@ class BlockchainWriter {
   // deploy transaction to the blockchain
   async executeTransaction(
     data: string,
-    receiverAddress: string,
+    to: string,
     privateKey: string,
     tx: object = {}
   ) {
-    const gasPrice = await this.web3.eth.getGasPrice();
+    const utils = new Utils(this.web3);
     const wallet = this.web3.eth.accounts.privateKeyToAccount(privateKey);
+    const from = wallet.address
+
+    const etherBalance = toEther(await utils.getCoinBalance(from));
+    const gasPrice = await this.web3.eth.getGasPrice();
+    const nonce = await this.web3.eth.getTransactionCount(from)
 
     const txSetting: { [key: string]: any } = {
-      from: wallet.address,
-      nonce: await this.web3.eth.getTransactionCount(wallet.address),
-      to: receiverAddress,
+      from,
+      to,
+      nonce,
       data,
       gasPrice,
       ...tx,
     };
 
-    txSetting.gas = await this.web3.eth.estimateGas(txSetting);
-    const sig = await wallet.signTransaction(txSetting);
-    const transaction = await this.web3.eth.sendSignedTransaction(
-      sig.rawTransaction
-    );
-    return transaction;
+    try {
+      const gas = await this.web3.eth.estimateGas(txSetting);
+      const gasCost = gas * gasPrice;
+
+      const leftBalance = etherBalance - toEther(gasCost);
+      if (leftBalance <= 0) return;
+
+      // check if value is provided and calculate the balance - value
+
+      const sig = await wallet.signTransaction(txSetting);
+      const transaction = await this.web3.eth.sendSignedTransaction(
+        sig.rawTransaction
+      );
+      return transaction;
+    }
+    catch (e) {
+      console.log(e)
+    }
   }
 }
 
@@ -207,6 +239,7 @@ export class Charter {
     this.walletsData = walletsData;
     this.dataFile = dataFile;
     this.web3 = new Web3(WEB3_PROVIDER_URI);
+    this.web3.eth.handleRevert = true;
     this.utils = new Utils(this.web3);
     this.dexRouter = new Dex(this.web3, DEX_ROUTER_CONTRACT_ADDRESS);
     this.primaryTokenContract = new Erc20(
@@ -240,6 +273,11 @@ export class Charter {
       { value: toWei(amount) }
     );
 
+    if (!transaction) {
+      console.log('unable to execute buy trade')
+      return;
+    }
+
     console.log("bought to from dex");
     console.log(transaction);
 
@@ -262,59 +300,79 @@ export class Charter {
   async sellToken(currentWallet: CreatedWallet, seller: WalletHistory) {
     // get the token balance of the address that is about
     // to make the trade (we can't rely on the hard coded value)
-    const tokenBalance = toEther(
-      await this.secondaryTokenContract.balanceOf(seller.address)
-    );
+    const tokenBalance = toEther(await this.secondaryTokenContract.balanceOf(seller.address)) - 1;
 
     // check if the wallet has given allowance to the dex router
     // else approve totalSupply (to save gas cost on the long run)
     const allowance = toEther(
-      await this.primaryTokenContract.allowance(
+      await this.secondaryTokenContract.allowance(
         seller.address,
         DEX_ROUTER_CONTRACT_ADDRESS
       )
     );
+
     if (allowance < tokenBalance) {
       const approveData = this.secondaryTokenContract.approve(
         DEX_ROUTER_CONTRACT_ADDRESS,
         await this.secondaryTokenContract.totalSupply()
       );
-
       const approveTransaction = await this.blockchainWriter.executeTransaction(
         approveData,
         SECONDARY_TOKEN_CONTRACT_ADDRESS,
         seller.privateKey
       );
+      if (!approveTransaction) {
+        console.log('unable to approve')
+        return;
+      }
       console.log(approveTransaction);
     }
 
-    const data = this.dexRouter.swapExactTokensForETH(
+    const coinToReceive = toEther(
+      (
+        (await this.dexRouter.getAmountsOut(
+          tokenBalance,
+          SECONDARY_TOKEN_CONTRACT_ADDRESS,
+          PRIMARY_TOKEN_CONTRACT_ADDRESS
+        )) as number[]
+      )[1]
+    );
+
+    console.log("bnb expected", coinToReceive);
+
+    const data = this.dexRouter.swapExactTokensForTokens(
       tokenBalance,
+      // coinToReceive,
       SECONDARY_TOKEN_CONTRACT_ADDRESS,
       PRIMARY_TOKEN_CONTRACT_ADDRESS,
       currentWallet.address
     );
 
-    // send the balance of the current connected address
-    const etherBalance = toEther(
-      await this.utils.getCoinBalance(currentWallet.address)
-    );
-    await this.sendCoin(currentWallet.privateKey, seller.address, etherBalance);
-
-    console.log(
-      `sent ${etherBalance} from: ${currentWallet.address} to: ${seller.address}`
-    );
-
-    // excute the trade after the current wallet balance has
-    // been sent to the address making the trade (meaning the addrss
-    // has enough coin to cover for gas fee now)
+    // excute the trade sell order
     const transaction = await this.blockchainWriter.executeTransaction(
       data,
       DEX_ROUTER_CONTRACT_ADDRESS,
       seller.privateKey
     );
+
+    if (!transaction) {
+      console.log('no transaction')
+      return;
+    }
+
     console.log("sold tokens");
     console.log(transaction);
+
+    // transfer current balance to the current wallet
+    const etherBalance = toEther(
+      await this.utils.getCoinBalance(seller.address)
+    );
+    if (etherBalance > 0) {
+      await this.sendCoinBalance(seller.privateKey, currentWallet.address);
+      console.log(
+        `sent ${etherBalance} from: ${seller.address} to: ${currentWallet.address}`
+      );
+    }
 
     // update the wallet balance and write to disk
     this.walletsData = this.walletsData.map((w) => {
@@ -326,45 +384,54 @@ export class Charter {
     await writeData(this.dataFile, this.walletsData);
   }
 
-  // tranfer token to another address
-  async sendToken(
-    tokenContract: Erc20,
-    receiverAddress: string,
-    amount: number,
-    privateKey: string
-  ) {
-    const data = tokenContract.transfer(receiverAddress, amount);
-    const transaction = await this.blockchainWriter.executeTransaction(
-      data,
-      (tokenContract.token as any).address as string,
-      privateKey
-    );
-    return transaction;
-  }
 
   // tranfer coin to another address
-  async sendCoin(privateKey: string, receiverAddress: string, amount: number) {
+  async sendCoinBalance(privateKey: string, to: string) {
     const wallet = this.web3.eth.accounts.privateKeyToAccount(privateKey);
+    const utils = new Utils(this.web3);
+    const from = wallet.address;
 
+    const etherBalance = toEther(await utils.getCoinBalance(from));
     const gasPrice = await this.web3.eth.getGasPrice();
-
+    const nonce = await this.web3.eth.getTransactionCount(from);
     const txSetting: { [key: string]: any } = {
-      from: wallet.address,
-      nonce: await this.web3.eth.getTransactionCount(wallet.address),
-      to: receiverAddress,
+      from,
+      to,
+      nonce,
       gasPrice,
-      value: "0",
+      value: "0"
     };
 
     // calculate and remove the transaction cost from the user balance before sending
-    txSetting.gas = await this.web3.eth.estimateGas(txSetting);
-    const gasCost = gasPrice * txSetting.gas;
+    try {
+      const gas = await this.web3.eth.estimateGas(txSetting);
+      const gasCost = gasPrice * gas;
+      const formatedCost = toEther(gasCost)
 
-    txSetting.value = toWei(amount - toEther(gasCost));
-    // sign the transaction from the old wallet, permiting the transfer of all balance
-    const sig = await wallet.signTransaction(txSetting);
-    // broadcast the transaction on the blockchain, confirming the signature
-    await this.web3.eth.sendSignedTransaction(sig.rawTransaction);
+      const newGas = (formatedCost - (formatedCost / 10))
+      // console.log('g', formatedCost, 'n', newGas)
+
+      const leftBalance = etherBalance - formatedCost;
+      // console.log(`balance: ${etherBalance}\nsend: ${leftBalance}\ngas: ${toEther(gasCost)}`)
+
+      if (leftBalance < 0) return;
+
+      txSetting.gas = toWei(newGas);
+      txSetting.value = toWei(leftBalance);
+
+      // console.log(txSetting)
+
+      // sign the transaction from the old wallet, permiting the transfer of all balance
+      const sig = await wallet.signTransaction(txSetting);
+      // broadcast the transaction on the blockchain, confirming the signature
+      console.log('sign transaction')
+      const transaction = await this.web3.eth.sendSignedTransaction(
+        sig.rawTransaction
+      );
+      return transaction
+    } catch (e) {
+      console.log(e)
+    }
   }
 
   // this will create a new wallet and send the balance of the old
@@ -372,29 +439,68 @@ export class Charter {
   // repeate the cicle
   async daemon(walletInfo: WalletHistory) {
     // get the coin balance of the wallet
-    let walletCoinBalance = toEther(
-      await this.utils.getCoinBalance(walletInfo.address)
-    );
+    let walletCoinBalance = toEther(await this.utils.getCoinBalance(walletInfo.address));
 
-    console.log(
-      `Balance: ${walletCoinBalance}\nAddress: ${walletInfo.address}`
-    );
+    if (walletCoinBalance <= 0) {
+      console.log('no gas to continue trade')
+      return;
+    }
+
+
+    const maxValue = Math.min(walletCoinBalance, MAX_INVESTMENT);
+    const minValue = Math.min(MIN_INVESTMENT, maxValue);
+
+    // generate random amount within user balance to invest
+    const investment: number = generateNumber(minValue, maxValue);
+
+    console.log(`Address: ${walletInfo.address} Balance: ${walletCoinBalance}`);
+
+    const remainCoinAfterInvestment = walletCoinBalance - investment
 
     // check if the current wallet have less than the minimum  coin required
-    // else sell the token of the rest bought and send the coin to this address
-    if (walletCoinBalance <= MIN_COIN_BALANCE) {
-      console.log("balance is too low!\nselling some token");
+    if (walletCoinBalance <= MIN_COIN_BALANCE || remainCoinAfterInvestment <= MIN_COIN_BALANCE) {
+      console.log('coin balance too low, selling token');
       const walletsWithToken = this.walletsData.filter((w) =>
-        w.tokenBalance > 0 ? w : undefined
+        w.tokenBalance > 0 ? true : false
       );
 
+      // else sell the token of the rest bought and send the coin to this address
       // sell all the bought tokens and send the coin to the current wallet
       for (const sellerWallet of walletsWithToken) {
-        await this.sellToken(walletInfo, sellerWallet);
+        const tokenBalance = toEther(
+          await this.secondaryTokenContract.balanceOf(sellerWallet.address)
+        );
+
+        // skip if the wallet token is empty
+        if (tokenBalance > 1) {
+          // send the balance of the current connected wallet to the seller
+          const transaction = await this.sendCoinBalance(walletInfo.privateKey, sellerWallet.address);
+          if (!transaction) {
+            console.log('unable to send to: ', sellerWallet.address)
+            continue;
+          }
+          // sell token
+          await this.sellToken(walletInfo, sellerWallet);
+        }
+        else {
+          console.log('seller token balance is too low')
+        }
+
+        const etherBalance = toEther(await this.utils.getCoinBalance(sellerWallet.address));
+        if (etherBalance <= 0.0002) continue;
+        const transaction = await this.sendCoinBalance(sellerWallet.privateKey, walletInfo.address);
+        if (!transaction) {
+          console.log('balance not sent to current trader')
+        }
       }
     }
 
-    const investment: number = 0.001; // generate random amount within user balance to invest
+    // return if gas is still to low to trade
+    const remainReCalculate = toEther(await this.utils.getCoinBalance(walletInfo.address)) - investment
+    if (walletCoinBalance <= MIN_COIN_BALANCE || remainReCalculate <= MIN_COIN_BALANCE) {
+      console.log('coin balance not updated')
+      return
+    }
 
     // execute the buy order
     await this.buyToken(investment, walletInfo.privateKey);
@@ -412,11 +518,7 @@ export class Charter {
     };
 
     // send wallet coin balance to the new
-    await this.sendCoin(
-      walletInfo.privateKey,
-      newWallet.address,
-      toEther(await this.utils.getCoinBalance(walletInfo.address))
-    );
+    await this.sendCoinBalance(walletInfo.privateKey, newWallet.address);
 
     // update wallet data and write to disk
     walletInfo.tokenBalance = toEther(
