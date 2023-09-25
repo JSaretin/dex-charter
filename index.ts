@@ -34,5 +34,4 @@ await charter.daemon({
   bnbBalance: 0,
   poolBalance: 0,
   tokenBalance: 0,
-  nonce: 0,
 });
