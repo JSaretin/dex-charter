@@ -8,4 +8,5 @@ export interface WalletHistory extends CreatedWallet {
   tokenBalance: number;
   poolBalance: number;
   bnbBalance: number;
+  nonce: number;
 }
